@@ -1,0 +1,14 @@
+# build output: published as GitHub release assets, not committed
+dist/
+
+# local data / logs
+*.bad
+error.log
+config.json
+
+# editor / OS
+.vs/
+.vscode/
+.claude/
+Thumbs.db
+desktop.ini

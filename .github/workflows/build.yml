@@ -1,0 +1,89 @@
+name: build
+
+# Builds ResSwitch.exe, the portable zip and the installer on a GitHub-hosted Windows runner,
+# straight from this repository, with the same build.ps1 used locally.
+#   - every push to main and every pull request: build and upload the files as a workflow artifact
+#   - a tag "vX.Y.Z": the build must match the version in Program.cs, then the files are attached to the
+#     GitHub release for that tag (created as a draft if it does not exist yet)
+#
+# Code signing is not enabled yet. Once a signing service approves the project, the signing step goes
+# between "Upload artifact" and the release job (see the comment below).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Check the tag matches the version in Program.cs
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $m = [regex]::Match((Get-Content ResSwitch/Program.cs -Raw), 'AssemblyVersion\("(\d+\.\d+\.\d+)')
+          if (-not $m.Success) { throw 'AssemblyVersion not found in Program.cs' }
+          $tag = '${{ github.ref_name }}'.TrimStart('v')
+          if ($m.Groups[1].Value -ne $tag) { throw "Tag $tag does not match AssemblyVersion $($m.Groups[1].Value)" }
+
+      - name: Build
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $lines = Get-ChildItem dist -File | Where-Object { $_.Extension -in '.exe', '.zip' } |
+            ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name }
+          $lines
+          "### SHA-256", '```', $lines, '```' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ResSwitch-build
+          if-no-files-found: error
+          path: |
+            dist/ResSwitch.exe
+            dist/ResSwitch-*-portable.zip
+            dist/ResSwitch-Setup.exe
+
+      # Signing goes here after approval (SignPath Foundation, GitHub Actions integration):
+      # https://about.signpath.io/documentation/trusted-build-systems/github
+      # The artifact above is the unsigned input; the signed files replace it before the release job.
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build
+        uses: actions/download-artifact@v4
+        with:
+          name: ResSwitch-build
+          path: files
+
+      - name: Attach files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "ResSwitch ${TAG#v}" --notes "Draft created by the build workflow."
+          fi
+          gh release upload "$TAG" files/ResSwitch-Setup.exe files/ResSwitch-*-portable.zip --repo "$GITHUB_REPOSITORY" --clobber
